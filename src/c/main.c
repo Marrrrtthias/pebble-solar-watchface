@@ -78,6 +78,7 @@ static int s_marker_n = 0;
 static int s_sel = 0;
 static AppTimer *s_idle_timer = NULL;
 static int16_t s_touch_x0, s_touch_y0, s_touch_x, s_touch_y;
+static bool s_touch_active = false, s_touch_armed = false;
 
 static char s_date_buf[16];
 static char s_time_buf[16];
@@ -206,9 +207,12 @@ static void compute_curve(int yday, int width) {
 
   // Sunrise / sunset: first threshold crossing upward / downward.
   s_rise_min = s_set_min = -1;
-  for (int x = 1; x < width; x++) {
-    bool up = s_curve_s[x - 1] < SIN_SUNRISE && s_curve_s[x] >= SIN_SUNRISE;
-    bool down = s_curve_s[x - 1] >= SIN_SUNRISE && s_curve_s[x] < SIN_SUNRISE;
+  // x == width closes the gap between the last column and midnight.
+  for (int x = 1; x <= width; x++) {
+    int32_t s0 = s_curve_s[x - 1];
+    int32_t s1 = x < width ? s_curve_s[x] : sin_elev_at(144000);
+    bool up = s0 < SIN_SUNRISE && s1 >= SIN_SUNRISE;
+    bool down = s0 >= SIN_SUNRISE && s1 < SIN_SUNRISE;
     if ((up && s_rise_min < 0) || (down && s_set_min < 0)) {
       int m = find_crossing((int32_t)(x - 1) * 144000 / width, (int32_t)x * 144000 / width, up);
       if (up) s_rise_min = m;
@@ -383,8 +387,7 @@ static void draw_label(GContext *ctx, const Marker *m, GPoint sun, int w) {
 
 static void canvas_update(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
-  int w = bounds.size.w;
-  if (w > 200) w = 200;
+  int w = canvas_width();
 
   ensure_curve();
 
@@ -429,13 +432,15 @@ static void canvas_update(Layer *layer, GContext *ctx) {
 
 // ---------------------------------------------------------------- time
 
-static void format_hm(char *buf, size_t n, int minute) {
+// `ampm` appends AM/PM in 12-hour mode (the clock itself omits it).
+static void format_hm(char *buf, size_t n, int minute, bool ampm) {
   int h = minute / 60;
-  if (!clock_is_24h_style()) {
-    h %= 12;
-    if (h == 0) h = 12;
+  if (clock_is_24h_style()) {
+    snprintf(buf, n, "%d:%02d", h, minute % 60);
+    return;
   }
-  snprintf(buf, n, "%d:%02d", h, minute % 60);
+  int h12 = h % 12 == 0 ? 12 : h % 12;
+  snprintf(buf, n, ampm ? "%d:%02d %s" : "%d:%02d", h12, minute % 60, h < 12 ? "AM" : "PM");
 }
 
 // Collect the available markers in chronological order. Keeps the
@@ -478,13 +483,13 @@ static void update_time(void) {
 #endif
   s_now_min = minute;
 
-  format_hm(s_time_buf, sizeof(s_time_buf), minute);
+  format_hm(s_time_buf, sizeof(s_time_buf), minute, false);
   text_layer_set_text(s_time_layer, s_time_buf);
 
   if (s_interactive) {
     build_markers();
     const Marker *m = &s_markers[s_sel];
-    format_hm(s_date_buf, sizeof(s_date_buf), m->min);
+    format_hm(s_date_buf, sizeof(s_date_buf), m->min, true);
     int d = m->min - s_now_min;
     int ad = d < 0 ? -d : d;
     snprintf(s_delta_buf, sizeof(s_delta_buf), "%c %02d:%02d h", d < 0 ? '-' : '+', ad / 60, ad % 60);
@@ -550,9 +555,11 @@ static void reset_idle_timer(void) {
   if (s_idle_timer) app_timer_reschedule(s_idle_timer, IDLE_TIMEOUT_MS);
 }
 
-static void handle_tap(void) {
+// Unarmed touches (screen contact while the watch is idle) may leave
+// interactive mode but never enter it.
+static void handle_tap(bool armed) {
   if (s_interactive) exit_interactive();
-  else enter_interactive();
+  else if (armed) enter_interactive();
 }
 
 // step > 0: later marker (swipe left), step < 0: earlier (swipe right)
@@ -568,6 +575,8 @@ static void handle_swipe(int step) {
 static void touch_handler(const TouchEvent *e, void *context) {
   switch (e->type) {
     case TouchEvent_Touchdown:
+      s_touch_active = true;
+      s_touch_armed = !e->non_navigational;
       s_touch_x0 = s_touch_x = e->x;
       s_touch_y0 = s_touch_y = e->y;
       break;
@@ -576,10 +585,12 @@ static void touch_handler(const TouchEvent *e, void *context) {
       s_touch_y = e->y;
       break;
     case TouchEvent_Liftoff: {
+      if (!s_touch_active) break;  // gesture started before we saw it
+      s_touch_active = false;
       int dx = s_touch_x - s_touch_x0, dy = s_touch_y - s_touch_y0;
       int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
       if (adx >= SWIPE_MIN_PX && adx > ady) handle_swipe(dx < 0 ? 1 : -1);
-      else if (adx < TAP_MAX_PX && ady < TAP_MAX_PX) handle_tap();
+      else if (adx < TAP_MAX_PX && ady < TAP_MAX_PX) handle_tap(s_touch_armed);
       break;
     }
   }
@@ -588,7 +599,7 @@ static void touch_handler(const TouchEvent *e, void *context) {
 #if DEBUG_TOUCH_VIA_TAP
 static void debug_tap_handler(AccelAxisType axis, int32_t direction) {
   if (axis == ACCEL_AXIS_X) handle_swipe(direction > 0 ? 1 : -1);
-  else if (axis == ACCEL_AXIS_Z) handle_tap();
+  else if (axis == ACCEL_AXIS_Z) handle_tap(true);
 }
 #endif
 
@@ -608,10 +619,13 @@ static void demo_tap_handler(AccelAxisType axis, int32_t direction) {
 #endif
 
 static void tick_handler(struct tm *tick_time, TimeUnits changed) {
-  if (changed & DAY_UNIT) exit_interactive();
   if (changed & HOUR_UNIT) {
     s_curve_day = -1;  // pick up DST / timezone changes
     request_location();
+  }
+  if ((changed & DAY_UNIT) && s_interactive) {
+    exit_interactive();  // also updates the time
+    return;
   }
   update_time();
 }
@@ -626,7 +640,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     persist_write_int(PERSIST_LON, s_lon);
     APP_LOG(APP_LOG_LEVEL_INFO, "Location: %ld, %ld", (long)s_lat, (long)s_lon);
     s_curve_day = -1;
-    layer_mark_dirty(s_canvas);
+    update_time();  // rebuilds markers and text in interactive mode
   }
 }
 
