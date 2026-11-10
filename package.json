@@ -1,0 +1,19 @@
+{
+  "name": "pebble-solar-watchface",
+  "author": "Matthias",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Solar",
+    "uuid": "fbd2cce8-d2a3-47c1-8664-1701ddfa3a20",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["emery"],
+    "watchapp": { "watchface": true },
+    "capabilities": ["location"],
+    "messageKeys": ["LAT", "LON", "REQUEST_LOC"],
+    "resources": { "media": [] }
+  }
+}

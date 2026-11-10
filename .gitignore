@@ -1,0 +1,18 @@
+# Pebble build output
+build/
+.lock-waf*
+.waf*
+
+# Node / pebble packages
+node_modules/
+
+# Emulator logs
+pebble-logs.txt
+.pebble-logs.pid
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Local Claude Code settings
+.claude/settings.local.json
