@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PEBBLE_TOOL_VERSION: "5.1.2"
+  PEBBLE_SDK_VERSION: "4.33.1"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install pebble-tool
+        run: uv tool install --python 3.13 "pebble-tool==${PEBBLE_TOOL_VERSION}"
+
+      # pebble-tool creates this folder with a non-atomic exists/makedirs check
+      # that can crash with FileExistsError; creating it up front avoids that.
+      - name: Prepare Pebble SDK folder
+        run: mkdir -p ~/.local/share/pebble-sdk/oauth_firebase
+
+      # The cache includes the SDKs/current symlink, so a restored SDK is
+      # already active and needs no `pebble sdk activate`.
+      - name: Cache Pebble SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pebble-sdk/SDKs
+          key: pebble-sdk-${{ runner.os }}-${{ env.PEBBLE_SDK_VERSION }}
+
+      - name: Install Pebble SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: pebble sdk install "${PEBBLE_SDK_VERSION}"
+
+      - name: Build
+        run: pebble build
+
+      - name: Upload PBW
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/*.pbw
+          archive: false
+          if-no-files-found: error
