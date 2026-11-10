@@ -15,6 +15,15 @@
 #define DEMO_DATE "SUN 6"
 #define DEMO_STEP_MIN 20
 
+// Emulator testing of the touch UI (the emulator cannot inject touches):
+// `pebble emu-tap --direction x+` = swipe left (next marker),
+// `x-` = swipe right (previous marker), `z+`/`z-` = tap (toggle).
+#define DEBUG_TOUCH_VIA_TAP 0
+
+#if DEMO_MODE && DEBUG_TOUCH_VIA_TAP
+#error "DEMO_MODE and DEBUG_TOUCH_VIA_TAP both use the accelerometer tap"
+#endif
+
 #define PERSIST_LAT 1
 #define PERSIST_LON 2
 #define DEFAULT_LAT 5000  // degrees x100 (used until the phone reports)
@@ -29,11 +38,17 @@
 #define SIN_10_DEG 11380
 #define SIN_8_DEG 9121
 #define SIN_25_DEG 27697
+#define SIN_SUNRISE (-953)  // sin(-0.833 deg): refraction + solar disc
+
+#define IDLE_TIMEOUT_MS 30000
+#define SWIPE_MIN_PX 30
+#define TAP_MAX_PX 12
 
 static Window *s_window;
 static Layer *s_canvas;
 static TextLayer *s_date_layer;
 static TextLayer *s_time_layer;
+static TextLayer *s_delta_layer;
 
 static int32_t s_lat = DEFAULT_LAT;
 static int32_t s_lon = DEFAULT_LON;
@@ -46,8 +61,27 @@ static int s_now_min = 0;
 static int s_demo_min = 0;
 #endif
 
+// Per-day sun constants (set by compute_curve, used by sin_elev_at)
+static int32_t s_ss, s_cc, s_offs100;
+// Marker times in local minutes of the day; -1 if the event doesn't happen
+static int s_rise_min = -1, s_noon_min = 720, s_set_min = -1;
+
+// Interactive mode
+typedef enum { MK_SUNRISE, MK_NOON, MK_NOW, MK_SUNSET } MarkerKind;
+typedef struct {
+  MarkerKind kind;
+  int min;
+} Marker;
+static bool s_interactive = false;
+static Marker s_markers[4];
+static int s_marker_n = 0;
+static int s_sel = 0;
+static AppTimer *s_idle_timer = NULL;
+static int16_t s_touch_x0, s_touch_y0, s_touch_x, s_touch_y;
+
 static char s_date_buf[16];
 static char s_time_buf[16];
+static char s_delta_buf[16];
 
 // ---------------------------------------------------------------- palettes
 
@@ -111,6 +145,27 @@ static int __attribute__((unused)) utc_offset_minutes(void) {
   return off;
 }
 
+// sin(elevation) in Q16 at local time `local100` (minutes x100).
+// Uses the per-day constants set by compute_curve.
+static int32_t sin_elev_at(int32_t local100) {
+  int32_t solar100 = local100 + s_offs100;
+  int32_t h = (int32_t)(((int64_t)(solar100 - 72000) * TRIG_MAX_ANGLE) / 144000);
+  return s_ss + (int32_t)(((int64_t)s_cc * cos_lookup(h)) >> 16);
+}
+
+// Bisect a SIN_SUNRISE crossing between lo and hi (minutes x100).
+// Returns the rounded local minute.
+static int find_crossing(int32_t lo, int32_t hi, bool rising) {
+  while (hi - lo > 10) {
+    int32_t mid = (lo + hi) / 2;
+    bool below = sin_elev_at(mid) < SIN_SUNRISE;
+    if (below == rising) lo = mid;
+    else hi = mid;
+  }
+  int m = ((lo + hi) / 2 + 50) / 100;
+  return m >= 1440 ? 1439 : m;
+}
+
 // Compute sin(elevation) samples across the local day.
 static void compute_curve(int yday, int width) {
   int32_t lat = deg100_to_angle(s_lat);
@@ -130,20 +185,56 @@ static void compute_curve(int yday, int width) {
 #else
   int tz = utc_offset_minutes();
 #endif
-  int32_t ss = (int32_t)(((int64_t)sin_lat * sin_d) >> 16);
-  int32_t cc = (int32_t)(((int64_t)cos_lat * cos_d) >> 16);
+  s_ss = (int32_t)(((int64_t)sin_lat * sin_d) >> 16);
+  s_cc = (int32_t)(((int64_t)cos_lat * cos_d) >> 16);
+  s_offs100 = -tz * 100 + s_lon * 4 + eot100;  // local -> solar time
 
   for (int x = 0; x < width; x++) {
-    // local minutes x100 at this column
-    int32_t local100 = (int32_t)x * 144000 / width;
-    int32_t solar100 = local100 - tz * 100 + s_lon * 4 + eot100;
-    int32_t h = (int32_t)(((int64_t)(solar100 - 72000) * TRIG_MAX_ANGLE) / 144000);
-    int32_t s = ss + (int32_t)(((int64_t)cc * cos_lookup(h)) >> 16);
+    int32_t s = sin_elev_at((int32_t)x * 144000 / width);
     s_curve_s[x] = s;
     s_curve_y[x] = HORIZON_Y - (int16_t)((s * CURVE_AMP) >> 16);
   }
   s_curve_w = width;
   s_curve_day = yday;
+
+  // Solar noon: hour angle 0, i.e. solar time 12:00.
+  int32_t noon100 = 72000 - s_offs100;
+  while (noon100 < 0) noon100 += 144000;
+  while (noon100 >= 144000) noon100 -= 144000;
+  s_noon_min = (noon100 + 50) / 100;
+  if (s_noon_min >= 1440) s_noon_min = 1439;
+
+  // Sunrise / sunset: first threshold crossing upward / downward.
+  s_rise_min = s_set_min = -1;
+  for (int x = 1; x < width; x++) {
+    bool up = s_curve_s[x - 1] < SIN_SUNRISE && s_curve_s[x] >= SIN_SUNRISE;
+    bool down = s_curve_s[x - 1] >= SIN_SUNRISE && s_curve_s[x] < SIN_SUNRISE;
+    if ((up && s_rise_min < 0) || (down && s_set_min < 0)) {
+      int m = find_crossing((int32_t)(x - 1) * 144000 / width, (int32_t)x * 144000 / width, up);
+      if (up) s_rise_min = m;
+      else s_set_min = m;
+    }
+  }
+}
+
+static int current_yday(void) {
+#if DEMO_MODE
+  return DEMO_YDAY;
+#else
+  time_t now = time(NULL);
+  return localtime(&now)->tm_yday;
+#endif
+}
+
+static int canvas_width(void) {
+  int w = layer_get_bounds(s_canvas).size.w;
+  return w > 200 ? 200 : w;
+}
+
+static void ensure_curve(void) {
+  int yday = current_yday();
+  int w = canvas_width();
+  if (s_curve_day != yday || s_curve_w != w) compute_curve(yday, w);
 }
 
 // ---------------------------------------------------------------- drawing
@@ -228,27 +319,81 @@ static void draw_glow(GContext *ctx, GRect bounds, GPoint sun, int32_t s) {
   graphics_release_frame_buffer(ctx, fb);
 }
 
+// ---------------------------------------------------------------- markers
+
+static int min_to_x(int min, int w) {
+  int x = min * w / 1440;
+  return x >= w ? w - 1 : (x < 0 ? 0 : x);
+}
+
+// Where a marker sits on the drawn path. Sunrise and sunset sit on the
+// horizon line, the others on the curve.
+static GPoint marker_point(const Marker *m, int w) {
+  int x = min_to_x(m->min, w);
+  bool on_horizon = m->kind == MK_SUNRISE || m->kind == MK_SUNSET;
+  return GPoint(x, on_horizon ? HORIZON_Y : s_curve_y[x]);
+}
+
+static const char *marker_name(MarkerKind kind) {
+  switch (kind) {
+    case MK_SUNRISE: return "SUNRISE";
+    case MK_NOON: return "NOON";
+    case MK_SUNSET: return "SUNSET";
+    default: return "NOW";
+  }
+}
+
+static void draw_markers(GContext *ctx, int w) {
+  for (int i = 0; i < s_marker_n; i++) {
+    const Marker *m = &s_markers[i];
+    GPoint p = marker_point(m, w);
+    switch (m->kind) {
+      case MK_SUNRISE:
+      case MK_SUNSET:
+        graphics_context_set_stroke_color(ctx, GColorWhite);
+        graphics_context_set_stroke_width(ctx, 1);
+        graphics_draw_line(ctx, GPoint(p.x, p.y - 4), GPoint(p.x, p.y + 4));
+        break;
+      case MK_NOON:
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        graphics_fill_circle(ctx, p, 2);
+        break;
+      case MK_NOW:
+        graphics_context_set_stroke_color(ctx, GColorLightGray);
+        graphics_context_set_stroke_width(ctx, 1);
+        graphics_draw_circle(ctx, p, 3);
+        break;
+    }
+  }
+}
+
+// Name of the selected marker, above the sun (below it if that would
+// collide with the text at the top).
+static void draw_label(GContext *ctx, const Marker *m, GPoint sun, int w) {
+  const int LW = 64, LH = 18, TOP_LIMIT = 50;
+  int x = sun.x - LW / 2;
+  if (x < 2) x = 2;
+  if (x > w - LW - 2) x = w - LW - 2;
+  int y = sun.y - SUN_R - LH - 4;
+  if (y < TOP_LIMIT) y = sun.y + SUN_R + 2;
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, marker_name(m->kind), fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                     GRect(x, y, LW, LH), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+}
+
 static void canvas_update(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   int w = bounds.size.w;
   if (w > 200) w = 200;
 
-  time_t now = time(NULL);
-  struct tm *t = localtime(&now);
-#if DEMO_MODE
-  (void)t;
-  int yday = DEMO_YDAY;
-#else
-  int yday = t->tm_yday;
-#endif
-  if (s_curve_day != yday || s_curve_w != w) compute_curve(yday, w);
+  ensure_curve();
 
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-  int sx = s_now_min * w / 1440;
-  if (sx >= w) sx = w - 1;
-  GPoint sun = GPoint(sx, s_curve_y[sx]);
+  const Marker *sel = s_interactive ? &s_markers[s_sel] : NULL;
+  int sx = min_to_x(sel ? sel->min : s_now_min, w);
+  GPoint sun = sel ? marker_point(sel, w) : GPoint(sx, s_curve_y[sx]);
   int32_t s = s_curve_s[sx];
 
   draw_glow(ctx, bounds, sun, s);
@@ -265,6 +410,8 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     graphics_draw_line(ctx, GPoint(x - 1, s_curve_y[x - 1]), GPoint(x, s_curve_y[x]));
   }
 
+  if (s_interactive) draw_markers(ctx, w);
+
   // Sun
   if (sun.y <= HORIZON_Y) {
     graphics_context_set_fill_color(ctx, GColorWhite);
@@ -276,9 +423,47 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_width(ctx, 2);
     graphics_draw_circle(ctx, sun, SUN_R - 1);
   }
+
+  if (sel) draw_label(ctx, sel, sun, w);
 }
 
 // ---------------------------------------------------------------- time
+
+static void format_hm(char *buf, size_t n, int minute) {
+  int h = minute / 60;
+  if (!clock_is_24h_style()) {
+    h %= 12;
+    if (h == 0) h = 12;
+  }
+  snprintf(buf, n, "%d:%02d", h, minute % 60);
+}
+
+// Collect the available markers in chronological order. Keeps the
+// selected marker kind (NOW on a fresh build).
+static void build_markers(void) {
+  ensure_curve();
+  MarkerKind keep = s_marker_n > 0 ? s_markers[s_sel].kind : MK_NOW;
+  int n = 0;
+  if (s_rise_min >= 0) s_markers[n++] = (Marker){MK_SUNRISE, s_rise_min};
+  s_markers[n++] = (Marker){MK_NOON, s_noon_min};
+  s_markers[n++] = (Marker){MK_NOW, s_now_min};
+  if (s_set_min >= 0) s_markers[n++] = (Marker){MK_SUNSET, s_set_min};
+  // Insertion sort by minute (n <= 4)
+  for (int i = 1; i < n; i++) {
+    Marker m = s_markers[i];
+    int j = i - 1;
+    while (j >= 0 && s_markers[j].min > m.min) {
+      s_markers[j + 1] = s_markers[j];
+      j--;
+    }
+    s_markers[j + 1] = m;
+  }
+  s_marker_n = n;
+  s_sel = 0;
+  for (int i = 0; i < n; i++) {
+    if (s_markers[i].kind == keep) s_sel = i;
+  }
+}
 
 static void update_time(void) {
   time_t now = time(NULL);
@@ -293,25 +478,119 @@ static void update_time(void) {
 #endif
   s_now_min = minute;
 
-  if (clock_is_24h_style()) {
-    snprintf(s_time_buf, sizeof(s_time_buf), "%d:%02d", minute / 60, minute % 60);
-  } else {
-    int h12 = (minute / 60) % 12;
-    snprintf(s_time_buf, sizeof(s_time_buf), "%d:%02d", h12 == 0 ? 12 : h12, minute % 60);
-  }
+  format_hm(s_time_buf, sizeof(s_time_buf), minute);
   text_layer_set_text(s_time_layer, s_time_buf);
 
-  strftime(s_date_buf, sizeof(s_date_buf), "%a %d", t);
-  for (char *p = s_date_buf; *p; p++) {
-    if (*p >= 'a' && *p <= 'z') *p -= 32;
-  }
+  if (s_interactive) {
+    build_markers();
+    const Marker *m = &s_markers[s_sel];
+    format_hm(s_date_buf, sizeof(s_date_buf), m->min);
+    int d = m->min - s_now_min;
+    int ad = d < 0 ? -d : d;
+    snprintf(s_delta_buf, sizeof(s_delta_buf), "%c %02d:%02d h", d < 0 ? '-' : '+', ad / 60, ad % 60);
+    text_layer_set_text(s_delta_layer, s_delta_buf);
+    layer_set_hidden(text_layer_get_layer(s_delta_layer), m->kind == MK_NOW);
+  } else {
+    strftime(s_date_buf, sizeof(s_date_buf), "%a %d", t);
+    for (char *p = s_date_buf; *p; p++) {
+      if (*p >= 'a' && *p <= 'z') *p -= 32;
+    }
 #if DEMO_MODE
-  snprintf(s_date_buf, sizeof(s_date_buf), "%s", DEMO_DATE);
+    snprintf(s_date_buf, sizeof(s_date_buf), "%s", DEMO_DATE);
 #endif
+  }
   text_layer_set_text(s_date_layer, s_date_buf);
 
   layer_mark_dirty(s_canvas);
 }
+
+// ---------------------------------------------------------------- interactive
+
+static void idle_timeout(void *data);
+
+static void set_layout(bool interactive) {
+  GRect bounds = layer_get_bounds(window_get_root_layer(s_window));
+  if (interactive) {
+    layer_set_frame(text_layer_get_layer(s_time_layer), GRect(0, 0, bounds.size.w - 5, 30));
+    text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
+    text_layer_set_text_color(s_time_layer, GColorLightGray);
+  } else {
+    layer_set_frame(text_layer_get_layer(s_time_layer), GRect(0, 22, bounds.size.w - 5, 52));
+    text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_42_LIGHT));
+    text_layer_set_text_color(s_time_layer, GColorWhite);
+  }
+  layer_set_hidden(text_layer_get_layer(s_delta_layer), !interactive);
+}
+
+static void enter_interactive(void) {
+  s_interactive = true;
+  s_marker_n = 0;  // build_markers then selects NOW
+  set_layout(true);
+  s_idle_timer = app_timer_register(IDLE_TIMEOUT_MS, idle_timeout, NULL);
+  update_time();
+}
+
+static void exit_interactive(void) {
+  if (!s_interactive) return;
+  s_interactive = false;
+  if (s_idle_timer) {
+    app_timer_cancel(s_idle_timer);
+    s_idle_timer = NULL;
+  }
+  set_layout(false);
+  update_time();
+}
+
+static void idle_timeout(void *data) {
+  s_idle_timer = NULL;
+  exit_interactive();
+}
+
+static void reset_idle_timer(void) {
+  if (s_idle_timer) app_timer_reschedule(s_idle_timer, IDLE_TIMEOUT_MS);
+}
+
+static void handle_tap(void) {
+  if (s_interactive) exit_interactive();
+  else enter_interactive();
+}
+
+// step > 0: later marker (swipe left), step < 0: earlier (swipe right)
+static void handle_swipe(int step) {
+  if (!s_interactive) return;
+  reset_idle_timer();
+  int sel = s_sel + step;
+  if (sel < 0 || sel >= s_marker_n) return;
+  s_sel = sel;
+  update_time();
+}
+
+static void touch_handler(const TouchEvent *e, void *context) {
+  switch (e->type) {
+    case TouchEvent_Touchdown:
+      s_touch_x0 = s_touch_x = e->x;
+      s_touch_y0 = s_touch_y = e->y;
+      break;
+    case TouchEvent_PositionUpdate:
+      s_touch_x = e->x;
+      s_touch_y = e->y;
+      break;
+    case TouchEvent_Liftoff: {
+      int dx = s_touch_x - s_touch_x0, dy = s_touch_y - s_touch_y0;
+      int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+      if (adx >= SWIPE_MIN_PX && adx > ady) handle_swipe(dx < 0 ? 1 : -1);
+      else if (adx < TAP_MAX_PX && ady < TAP_MAX_PX) handle_tap();
+      break;
+    }
+  }
+}
+
+#if DEBUG_TOUCH_VIA_TAP
+static void debug_tap_handler(AccelAxisType axis, int32_t direction) {
+  if (axis == ACCEL_AXIS_X) handle_swipe(direction > 0 ? 1 : -1);
+  else if (axis == ACCEL_AXIS_Z) handle_tap();
+}
+#endif
 
 static void request_location(void) {
   DictionaryIterator *iter;
@@ -329,6 +608,7 @@ static void demo_tap_handler(AccelAxisType axis, int32_t direction) {
 #endif
 
 static void tick_handler(struct tm *tick_time, TimeUnits changed) {
+  if (changed & DAY_UNIT) exit_interactive();
   if (changed & HOUR_UNIT) {
     s_curve_day = -1;  // pick up DST / timezone changes
     request_location();
@@ -373,10 +653,18 @@ static void window_load(Window *window) {
   text_layer_set_text_alignment(s_time_layer, GTextAlignmentRight);
   layer_add_child(root, text_layer_get_layer(s_time_layer));
 
+  s_delta_layer = text_layer_create(GRect(5, 24, bounds.size.w - 10, 24));
+  text_layer_set_background_color(s_delta_layer, GColorClear);
+  text_layer_set_text_color(s_delta_layer, GColorLightGray);
+  text_layer_set_font(s_delta_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  layer_set_hidden(text_layer_get_layer(s_delta_layer), true);
+  layer_add_child(root, text_layer_get_layer(s_delta_layer));
+
   update_time();
 }
 
 static void window_unload(Window *window) {
+  text_layer_destroy(s_delta_layer);
   text_layer_destroy(s_time_layer);
   text_layer_destroy(s_date_layer);
   layer_destroy(s_canvas);
@@ -403,6 +691,10 @@ static void init(void) {
 #endif
 
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
+  touch_service_subscribe(touch_handler, NULL);
+#if DEBUG_TOUCH_VIA_TAP
+  accel_tap_service_subscribe(debug_tap_handler);
+#endif
 
   app_message_register_inbox_received(inbox_received);
   app_message_open(64, 32);
@@ -410,6 +702,7 @@ static void init(void) {
 
 static void deinit(void) {
   tick_timer_service_unsubscribe();
+  touch_service_unsubscribe();
   window_destroy(s_window);
 }
 

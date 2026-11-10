@@ -15,9 +15,13 @@ Notes for agents working on this repo. **When a new decision is made, add it her
 - Time font is the system `BITHAM_42_LIGHT` (no bundled font for now).
 - 12-hour mode shows no AM/PM, matching the original; the sun's position tells the two apart.
 - Accepted: around midnight the sun is half cut off at the left/right screen edge. Do not fix unless asked.
+- Watchfaces get no button events, so interactive mode is touch-only: tap toggles it, swipe left/right steps to the next/previous marker (chronological, clamped at the ends), 30 s without input exits. Raw `touch_service` (not recognizers); the touch sensor stays subscribed, a deliberate battery tradeoff.
+- Interactive markers: sunrise, solar noon, now, sunset. Displayed sunrise/sunset times use the standard -0.833 deg threshold (matches published times); their markers sit on the horizon line. Solar noon is computed analytically (hour angle 0). Polar day/night drops sunrise/sunset.
+- Interactive mode reuses the normal render path: the sun and glow are drawn at the selected marker's time. No animation when switching markers (battery).
 
 ## Debug / store assets
-- `DEBUG_FAKE_MINUTE` freezes the clock. `DEMO_MODE` fixes Berlin on 6 Sep (CEST) and advances 20 min per `pebble emu-tap`; it was used for the store GIF. **Both must be off (`-1` / `0`) in commits and releases.**
+- `DEBUG_TOUCH_VIA_TAP` maps `pebble emu-tap` to touch gestures (the emulator cannot inject touch): `--direction z+` = tap, `x+` = swipe left (next), `x-` = swipe right (previous). Cannot be combined with `DEMO_MODE`.
+- `DEBUG_FAKE_MINUTE` freezes the clock. `DEMO_MODE` fixes Berlin on 6 Sep (CEST) and advances 20 min per `pebble emu-tap`; it was used for the store GIF. **All debug flags (`DEBUG_FAKE_MINUTE`, `DEMO_MODE`, `DEBUG_TOUCH_VIA_TAP`) must be off (`-1` / `0`) in commits and releases.**
 - Store assets live in `store/`: `make_icon.py` (icons 144/48) and `make_gif.py` (frames → GIF). They are plain Python with no dependencies (Pillow isn't installed). README screenshots are in `screenshots/`.
 - Pebble SDK commands need to run outside the sandbox (they write to `~/Library/Application Support/Pebble SDK`).
 
