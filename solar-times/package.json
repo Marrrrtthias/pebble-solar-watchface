@@ -1,0 +1,19 @@
+{
+  "name": "pebble-solar-times",
+  "author": "Matthias",
+  "version": "1.1.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Solar Times",
+    "uuid": "c3742ef6-0a5f-4b49-8a4e-bf15c3d84925",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["emery"],
+    "watchapp": { "watchface": false },
+    "capabilities": ["location"],
+    "messageKeys": ["LAT", "LON", "REQUEST_LOC"],
+    "resources": { "media": [] }
+  }
+}

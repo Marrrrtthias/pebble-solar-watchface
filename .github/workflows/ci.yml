@@ -51,12 +51,23 @@ jobs:
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: pebble sdk install "${PEBBLE_SDK_VERSION}"
 
-      - name: Build
+      - name: Build watchface
         run: pebble build
 
-      - name: Upload PBW
+      - name: Build Solar Times app
+        working-directory: solar-times
+        run: pebble build
+
+      - name: Upload watchface PBW
         uses: actions/upload-artifact@v7
         with:
           path: build/*.pbw
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload Solar Times PBW
+        uses: actions/upload-artifact@v7
+        with:
+          path: solar-times/build/*.pbw
           archive: false
           if-no-files-found: error

@@ -11,19 +11,23 @@ A Pebble Time 2 (emery) watchface inspired by the Apple Watch Solar face. It plo
 - Your location comes from the phone and is cached on the watch. It falls back to 50°N, 8°E until the phone reports a location.
 - The face redraws once per minute.
 
-### Interactive mode
+### Solar Times app
 
 | Now | Sunrise | Noon | Sunset |
 |:---:|:---:|:---:|:---:|
 | ![Now](screenshots/interactive_now.png) | ![Sunrise](screenshots/interactive_sunrise.png) | ![Noon](screenshots/interactive_noon.png) | ![Sunset](screenshots/interactive_sunset.png) |
 
-- Tap the screen to show markers for sunrise, solar noon, now and sunset on the sun path.
-- Swipe left or right to move the sun to the next or previous marker. The top left shows that marker's time and its offset from now (e.g. `+ 01:20 h`). The current time moves to the top right.
-- Tap again to go back to the normal face. It also returns on its own after 30 seconds without input.
+A companion watchapp that shows markers for sunrise, solar noon, now and sunset on the sun path. Watchfaces can't react to buttons or touch, so it is a separate app.
+
+- Up and Down move the sun to the previous or next marker. The top left shows that marker's time and its offset from now (e.g. `+ 01:20 h`). The current time is at the top right. Select jumps back to now.
+- Back returns to the watchface. So does 30 seconds without input.
+- To open it straight from the watchface, assign Solar Times to a button in the watch's Settings → Quick Launch.
 
 ## Build and install
 
 Requires the [Pebble SDK](https://developer.repebble.com/).
+
+The watchface is the project at the repo root, the Solar Times app is in `solar-times/`. Build and install each from its folder:
 
 ```bash
 pebble build
@@ -31,4 +35,4 @@ pebble install --emulator emery   # emulator
 pebble install --cloudpebble      # watch
 ```
 
-To preview a specific time, set `DEBUG_FAKE_MINUTE` in `src/c/main.c` to a minute of the day (e.g. `990` for 16:30).
+To preview a specific time, set `DEBUG_FAKE_MINUTE` in `src/c/main.c` (or `solar-times/src/c/main.c`) to a minute of the day (e.g. `990` for 16:30).
