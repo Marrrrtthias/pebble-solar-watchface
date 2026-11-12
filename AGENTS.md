@@ -15,7 +15,7 @@ Notes for agents working on this repo. **When a new decision is made, add it her
 - Time font is the system `BITHAM_42_LIGHT` (no bundled font for now).
 - 12-hour mode shows no AM/PM on the clock, matching the original; the sun's position tells the two apart. Interactive marker times do show AM/PM, since they are away from now.
 - Accepted: around midnight the sun is half cut off at the left/right screen edge. Do not fix unless asked.
-- Watchfaces get no button events, so interactive mode is touch-only: tap toggles it, swipe left/right steps to the next/previous marker (chronological, clamped at the ends), 30 s without input exits. Do not gate entry on `TouchEvent.non_navigational`: gating on it made interactive mode unreachable on the real watch (it appears to be set for every touch on the idle watchface). Raw `touch_service` (not recognizers); the touch sensor stays subscribed, a deliberate battery tradeoff.
+- Watchfaces get no button events, so interactive mode is touch-only: tap toggles it, swipe left/right steps to the next/previous marker (chronological, clamped at the ends), 30 s without input exits. Only armed touches (not `non_navigational`) enter it, so sleeve or palm contact on the idle face does not. Raw `touch_service` (not recognizers); the touch sensor stays subscribed, a deliberate battery tradeoff.
 - Interactive markers: sunrise, solar noon, now, sunset. Displayed sunrise/sunset times use the standard -0.833 deg threshold (matches published times); their markers sit on the horizon line. Solar noon is computed analytically (hour angle 0). Polar day/night drops sunrise/sunset.
 - Interactive mode reuses the normal render path: the sun and glow are drawn at the selected marker's time. No animation when switching markers (battery).
 

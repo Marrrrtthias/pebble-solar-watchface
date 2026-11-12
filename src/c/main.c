@@ -78,7 +78,7 @@ static int s_marker_n = 0;
 static int s_sel = 0;
 static AppTimer *s_idle_timer = NULL;
 static int16_t s_touch_x0, s_touch_y0, s_touch_x, s_touch_y;
-static bool s_touch_active = false;
+static bool s_touch_active = false, s_touch_armed = false;
 
 static char s_date_buf[16];
 static char s_time_buf[16];
@@ -555,11 +555,11 @@ static void reset_idle_timer(void) {
   if (s_idle_timer) app_timer_reschedule(s_idle_timer, IDLE_TIMEOUT_MS);
 }
 
-// Don't gate entry on TouchEvent.non_navigational: on the real watch that
-// blocked every tap (it seems to be set for all idle-watchface contact).
-static void handle_tap(void) {
+// Unarmed touches (screen contact while the watch is idle) may leave
+// interactive mode but never enter it.
+static void handle_tap(bool armed) {
   if (s_interactive) exit_interactive();
-  else enter_interactive();
+  else if (armed) enter_interactive();
 }
 
 // step > 0: later marker (swipe left), step < 0: earlier (swipe right)
@@ -576,7 +576,7 @@ static void touch_handler(const TouchEvent *e, void *context) {
   switch (e->type) {
     case TouchEvent_Touchdown:
       s_touch_active = true;
-      APP_LOG(APP_LOG_LEVEL_DEBUG, "touch down %d,%d nn=%d", e->x, e->y, e->non_navigational);
+      s_touch_armed = !e->non_navigational;
       s_touch_x0 = s_touch_x = e->x;
       s_touch_y0 = s_touch_y = e->y;
       break;
@@ -589,9 +589,8 @@ static void touch_handler(const TouchEvent *e, void *context) {
       s_touch_active = false;
       int dx = s_touch_x - s_touch_x0, dy = s_touch_y - s_touch_y0;
       int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
-      APP_LOG(APP_LOG_LEVEL_DEBUG, "touch up dx=%d dy=%d", dx, dy);
       if (adx >= SWIPE_MIN_PX && adx > ady) handle_swipe(dx < 0 ? 1 : -1);
-      else if (adx < TAP_MAX_PX && ady < TAP_MAX_PX) handle_tap();
+      else if (adx < TAP_MAX_PX && ady < TAP_MAX_PX) handle_tap(s_touch_armed);
       break;
     }
   }
@@ -600,7 +599,7 @@ static void touch_handler(const TouchEvent *e, void *context) {
 #if DEBUG_TOUCH_VIA_TAP
 static void debug_tap_handler(AccelAxisType axis, int32_t direction) {
   if (axis == ACCEL_AXIS_X) handle_swipe(direction > 0 ? 1 : -1);
-  else if (axis == ACCEL_AXIS_Z) handle_tap();
+  else if (axis == ACCEL_AXIS_Z) handle_tap(true);
 }
 #endif
 
@@ -707,7 +706,6 @@ static void init(void) {
 
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   touch_service_subscribe(touch_handler, NULL);
-  APP_LOG(APP_LOG_LEVEL_INFO, "touch enabled: %d", touch_service_is_enabled());
 #if DEBUG_TOUCH_VIA_TAP
   accel_tap_service_subscribe(debug_tap_handler);
 #endif
