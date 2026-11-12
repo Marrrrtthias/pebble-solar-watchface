@@ -41,6 +41,8 @@
 #define SIN_SUNRISE (-953)  // sin(-0.833 deg): refraction + solar disc
 
 #define IDLE_TIMEOUT_MS 30000
+#define SWIPE_MIN_PX 30
+#define TAP_MAX_PX 12
 
 static Window *s_window;
 static Layer *s_canvas;
@@ -75,6 +77,8 @@ static Marker s_markers[4];
 static int s_marker_n = 0;
 static int s_sel = 0;
 static AppTimer *s_idle_timer = NULL;
+static int16_t s_touch_x0, s_touch_y0, s_touch_x, s_touch_y;
+static bool s_touch_active = false;
 
 static char s_date_buf[16];
 static char s_time_buf[16];
@@ -568,24 +572,29 @@ static void handle_swipe(int step) {
   update_time();
 }
 
-// Raw touch stream: logging only. On the real watch it delivered nothing to
-// the watchface, so gestures come from the recognizers below.
-static void touch_log_handler(const TouchEvent *e, void *context) {
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "raw touch type=%d %d,%d nn=%d", e->type, e->x, e->y,
-          e->non_navigational);
-}
-
-static void tap_recognized(const Recognizer *r, RecognizerEvent event) {
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "tap recognizer event=%d", event);
-  if (event == RecognizerEvent_Completed) handle_tap();
-}
-
-static void swipe_recognized(const Recognizer *r, RecognizerEvent event) {
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "swipe recognizer event=%d", event);
-  if (event != RecognizerEvent_Completed) return;
-  SwipeDirection dir = swipe_recognizer_get_direction(r);
-  if (dir == SwipeDirection_Left) handle_swipe(1);
-  else if (dir == SwipeDirection_Right) handle_swipe(-1);
+static void touch_handler(const TouchEvent *e, void *context) {
+  switch (e->type) {
+    case TouchEvent_Touchdown:
+      s_touch_active = true;
+      APP_LOG(APP_LOG_LEVEL_DEBUG, "touch down %d,%d nn=%d", e->x, e->y, e->non_navigational);
+      s_touch_x0 = s_touch_x = e->x;
+      s_touch_y0 = s_touch_y = e->y;
+      break;
+    case TouchEvent_PositionUpdate:
+      s_touch_x = e->x;
+      s_touch_y = e->y;
+      break;
+    case TouchEvent_Liftoff: {
+      if (!s_touch_active) break;  // gesture started before we saw it
+      s_touch_active = false;
+      int dx = s_touch_x - s_touch_x0, dy = s_touch_y - s_touch_y0;
+      int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+      APP_LOG(APP_LOG_LEVEL_DEBUG, "touch up dx=%d dy=%d", dx, dy);
+      if (adx >= SWIPE_MIN_PX && adx > ady) handle_swipe(dx < 0 ? 1 : -1);
+      else if (adx < TAP_MAX_PX && ady < TAP_MAX_PX) handle_tap();
+      break;
+    }
+  }
 }
 
 #if DEBUG_TOUCH_VIA_TAP
@@ -666,13 +675,6 @@ static void window_load(Window *window) {
   layer_set_hidden(text_layer_get_layer(s_delta_layer), true);
   layer_add_child(root, text_layer_get_layer(s_delta_layer));
 
-  // Take touches away from the system's button emulation and hand them to
-  // our recognizers. The window owns and destroys them.
-  window_set_touch_bridge_disabled(window, true);
-  window_attach_recognizer(window, tap_recognizer_create(tap_recognized, NULL));
-  window_attach_recognizer(window, swipe_recognizer_create(swipe_recognized, NULL,
-                                                           SwipeDirection_Left | SwipeDirection_Right));
-
   update_time();
 }
 
@@ -704,7 +706,7 @@ static void init(void) {
 #endif
 
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
-  touch_service_subscribe(touch_log_handler, NULL);
+  touch_service_subscribe(touch_handler, NULL);
   APP_LOG(APP_LOG_LEVEL_INFO, "touch enabled: %d", touch_service_is_enabled());
 #if DEBUG_TOUCH_VIA_TAP
   accel_tap_service_subscribe(debug_tap_handler);
