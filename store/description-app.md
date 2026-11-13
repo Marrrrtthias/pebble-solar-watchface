@@ -1,6 +1,6 @@
 The interactive companion app to the Solar watchface for Pebble Time 2 (emery). It shows the same sun path for your location and lets you move the sun to today's sunrise, solar noon and sunset.
 
-Made to be used together with the Solar watchface: {{SOLAR_WATCHFACE_STORE_URL}}
+Made to be used together with the Solar watchface: https://apps.repebble.com/959e38bf7c0d48ad92d4cdba
 
 - Markers on the sun path show sunrise and sunset (where the path crosses the horizon), solar noon (the highest point) and the current time.
 - Up and Down move the sun to the previous or next marker, and the glow follows it. Select jumps back to now.
