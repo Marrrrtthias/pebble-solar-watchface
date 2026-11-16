@@ -32,4 +32,4 @@ Notes for agents working on this repo. **When a new decision is made, add it her
 
 ## Git / releases
 - Commit with the GitHub noreply email (already set in the local git config). GitHub rejects pushes that use the private address.
-- Releases: tag `vX.Y.Z` on `main`, matching `version` in both `package.json` and `solar-times/package.json`. Attach clean-built `solar-X.Y.Z.pbw` and `solar-times-X.Y.Z.pbw`, since `build/` is gitignored.
+- Releases: bump `version` in both `package.json` and `solar-times/package.json`, merge to `main`, then push a tag `vX.Y.Z`. `.github/workflows/release.yml` checks that the tag matches both versions and that the debug flags are off, builds both projects, and creates the GitHub release with `solar-X.Y.Z.pbw` and `solar-times-X.Y.Z.pbw` attached. Don't build or upload release files by hand.
